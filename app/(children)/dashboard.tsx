@@ -1,16 +1,26 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
+  TextInput,
   ActivityIndicator,
   Alert,
-  TextInput,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import * as SecureStore from "expo-secure-store";
 import * as Location from "expo-location";
+import * as SecureStore from "expo-secure-store";
+import * as TaskManager from "expo-task-manager";
+import * as BackgroundTask from "expo-background-task";
+
 import LogoutButton from "@/components/LogoutButton";
+
+import {
+  CHILD_LOCATION_TASK,
+  registerChildLocationTask,
+  unregisterChildLocationTask,
+  getChildLocationTaskInfo,
+} from "@/tasks/childLocationTask";
 
 export default function ChildDashboard() {
   const COLORS = {
@@ -21,43 +31,50 @@ export default function ChildDashboard() {
   };
 
   const API = "http://168.231.123.52:4000";
-
-  // 🟢 Hardcoded child ID (your requirement)
   const childId = "69199663f20f1f9df76b7518";
 
-  const [sharingEnabled, setSharingEnabled] = useState(false);
-  const [sending, setSending] = useState(false);
+  const [joinCode, setJoinCode] = useState("");
+  const [sendingOnce, setSendingOnce] = useState(false);
+
+  const [taskStatus, setTaskStatus] =
+    useState<BackgroundTask.BackgroundTaskStatus | null>(null);
+  const [isRegistered, setIsRegistered] = useState(false);
   const [lastSent, setLastSent] = useState<string | null>(null);
 
-  // NEW STATES (for join family)
-  const [joinCode, setJoinCode] = useState("");
-
-  const intervalRef = useRef<NodeJS.Timeout | null>(null);
-
-  // Cleanup interval on unmount
+  // -----------------------------------------------------
+  // Load task info on screen focus/mount
+  // -----------------------------------------------------
   useEffect(() => {
-    return () => intervalRef.current && clearInterval(intervalRef.current);
+    refreshTaskInfo();
   }, []);
 
-  // ---------------------------------------------
-  // 🔵 Send location to backend
-  // ---------------------------------------------
+  const refreshTaskInfo = async () => {
+    const info = await getChildLocationTaskInfo();
+    setTaskStatus(info.status);
+    setIsRegistered(info.isRegistered);
+  };
+
+  // -----------------------------------------------------
+  // Send location manually once
+  // -----------------------------------------------------
   const sendLocationOnce = async () => {
     try {
-      setSending(true);
+      setSendingOnce(true);
 
       const token = await SecureStore.getItemAsync("token");
-      if (!token) return Alert.alert("Error", "Missing token. Relogin.");
+      if (!token) {
+        Alert.alert("Error", "Please login again.");
+        return;
+      }
 
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== "granted") {
-        Alert.alert("Permission Required", "Location access needed.");
-        setSharingEnabled(false);
+      let fg = await Location.requestForegroundPermissionsAsync();
+      if (fg.status !== "granted") {
+        Alert.alert("Permission", "Foreground permission required.");
         return;
       }
 
       const pos = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
+        accuracy: Location.Accuracy.Highest,
       });
 
       const lat = pos.coords.latitude;
@@ -73,54 +90,77 @@ export default function ChildDashboard() {
       });
 
       const data = await res.json();
-      if (!data.success) return Alert.alert("Error", "Failed to send location");
+      if (!data.success) {
+        Alert.alert("Error", "Failed to send location.");
+        return;
+      }
 
-      const time = new Date().toLocaleTimeString();
-      setLastSent(time);
-    } catch (err) {
-      console.log("Location update error:", err);
-      Alert.alert("Error", "Something went wrong");
+      const now = new Date().toLocaleTimeString();
+      setLastSent(now);
+
+      Alert.alert("Success", "Location sent!");
     } finally {
-      setSending(false);
+      setSendingOnce(false);
     }
   };
 
-  // ---------------------------------------------
-  // 🟢 Start sharing
-  // ---------------------------------------------
-  const startSharing = async () => {
-    await sendLocationOnce();
+  // -----------------------------------------------------
+  // Start background location
+  // -----------------------------------------------------
+  const startBackground = async () => {
+    const status = await BackgroundTask.getStatusAsync();
+    if (status !== BackgroundTask.BackgroundTaskStatus.Available) {
+      Alert.alert("Unavailable", "Background tasks not available.");
+      return;
+    }
 
-    intervalRef.current = setInterval(sendLocationOnce, 120000);
-    setSharingEnabled(true);
+    let fg = await Location.requestForegroundPermissionsAsync();
+    if (fg.status !== "granted") {
+      Alert.alert("Permission", "Foreground permission needed.");
+      return;
+    }
 
-    Alert.alert("Enabled", "Location sharing started");
+    let bg = await Location.requestBackgroundPermissionsAsync();
+    if (bg.status !== "granted") {
+      Alert.alert("Permission", "Background location permission needed.");
+      return;
+    }
+
+    await registerChildLocationTask();
+    await refreshTaskInfo();
+
+    Alert.alert(
+      "Enabled",
+      "Background sharing started.\nYour location will send periodically."
+    );
   };
 
-  // ---------------------------------------------
-  // 🔴 Stop sharing
-  // ---------------------------------------------
-  const stopSharing = () => {
-    intervalRef.current && clearInterval(intervalRef.current);
-    setSharingEnabled(false);
-
-    Alert.alert("Stopped", "Location sharing stopped");
+  // -----------------------------------------------------
+  // Stop background location
+  // -----------------------------------------------------
+  const stopBackground = async () => {
+    await unregisterChildLocationTask();
+    await refreshTaskInfo();
+    Alert.alert("Stopped", "Background sharing stopped.");
   };
 
-  const toggleSharing = async () => {
-    sharingEnabled ? stopSharing() : await startSharing();
+  const toggleBackground = async () => {
+    if (isRegistered) await stopBackground();
+    else await startBackground();
   };
 
-  // ---------------------------------------------------
-  // 🟣 Join Family by Code
-  // ---------------------------------------------------
-  const joinFamilyByCode = async () => {
+  // -----------------------------------------------------
+  // Join Family
+  // -----------------------------------------------------
+  const joinFamily = async () => {
     if (!joinCode.trim()) {
-      return Alert.alert("Error", "Enter a valid code");
+      Alert.alert("Error", "Enter valid family code.");
+      return;
     }
 
     try {
       const token = await SecureStore.getItemAsync("token");
+      if (!token) return Alert.alert("Error", "Login again.");
 
       const res = await fetch(`${API}/api/family/join`, {
         method: "POST",
@@ -132,40 +172,42 @@ export default function ChildDashboard() {
       });
 
       const data = await res.json();
-
       if (!data.family) {
-        return Alert.alert("Error", "Invalid family code");
+        Alert.alert("Error", "Invalid code.");
+        return;
       }
 
-      // Save family details locally
       await SecureStore.setItemAsync("familyId", data.family._id);
-      await SecureStore.setItemAsync("familyName", data.family.familyName);
-      await SecureStore.setItemAsync("inviteCode", data.family.inviteCode);
 
-      Alert.alert("Joined!", "You successfully joined a family group");
+      Alert.alert("Success", "Joined family!");
       setJoinCode("");
-    } catch (err) {
-      console.log("Join error:", err);
-      Alert.alert("Error", "Something went wrong while joining");
+    } catch (e) {
+      Alert.alert("Error", "Failed to join family.");
     }
   };
 
-  // ---------------------------------------------
+  // -----------------------------------------------------
   // UI
-  // ---------------------------------------------
+  // -----------------------------------------------------
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.white }}>
       <View style={{ padding: 20, flex: 1 }}>
-        
-        {/* Header */}
-        <View style={{ flexDirection: "row", justifyContent: "space-between", marginBottom: 20 }}>
+        {/* HEADER */}
+        <View
+          style={{
+            flexDirection: "row",
+            justifyContent: "space-between",
+            marginBottom: 20,
+          }}
+        >
           <Text style={{ fontSize: 24, fontWeight: "700", color: COLORS.navy }}>
             Child Dashboard
           </Text>
+
           <LogoutButton />
         </View>
 
-        {/* JOIN FAMILY SECTION */}
+        {/* JOIN FAMILY */}
         <View
           style={{
             backgroundColor: COLORS.grey,
@@ -179,15 +221,15 @@ export default function ChildDashboard() {
           </Text>
 
           <TextInput
-            placeholder="Enter family code"
-            placeholderTextColor={COLORS.navy}
+            placeholder="Enter Family Code"
             value={joinCode}
             onChangeText={setJoinCode}
+            placeholderTextColor={COLORS.navy}
             style={{
-              marginTop: 12,
               backgroundColor: COLORS.white,
               padding: 12,
               borderRadius: 10,
+              marginTop: 12,
               borderWidth: 1,
               borderColor: COLORS.grey,
               color: COLORS.navy,
@@ -195,7 +237,7 @@ export default function ChildDashboard() {
           />
 
           <TouchableOpacity
-            onPress={joinFamilyByCode}
+            onPress={joinFamily}
             style={{
               backgroundColor: COLORS.primary,
               paddingVertical: 12,
@@ -210,55 +252,77 @@ export default function ChildDashboard() {
           </TouchableOpacity>
         </View>
 
-        {/* STATUS CARD */}
+        {/* BACKGROUND STATUS CARD */}
         <View
           style={{
             backgroundColor: COLORS.grey,
-            padding: 20,
-            borderRadius: 16,
+            padding: 16,
+            borderRadius: 14,
             marginBottom: 20,
           }}
         >
           <Text style={{ fontSize: 18, fontWeight: "700", color: COLORS.navy }}>
-            Location Sharing
+            Background Location Sharing
           </Text>
-          <Text style={{ color: COLORS.navy, opacity: 0.7, marginTop: 6 }}>
-            {sharingEnabled
-              ? "Your location is being shared every 2 minutes."
-              : "Your location is not being shared."}
+
+          <Text style={{ color: COLORS.navy, marginTop: 8 }}>
+            Service Status:{" "}
+            {taskStatus !== null
+              ? BackgroundTask.BackgroundTaskStatus[taskStatus]
+              : "Unknown"}
+          </Text>
+
+          <Text style={{ color: COLORS.navy }}>
+            Registered: {isRegistered ? "YES" : "NO"}
           </Text>
 
           {lastSent && (
-            <Text style={{ color: COLORS.navy, opacity: 0.7, marginTop: 5 }}>
-              Last sent: {lastSent}
+            <Text style={{ color: COLORS.navy, marginTop: 6 }}>
+              Last Manual Send: {lastSent}
             </Text>
           )}
         </View>
 
-        {/* TOGGLE BUTTON */}
+        {/* TOGGLE BACKGROUND */}
         <TouchableOpacity
-          onPress={toggleSharing}
-          disabled={sending}
+          onPress={toggleBackground}
           style={{
-            backgroundColor: sharingEnabled ? "#D9534F" : COLORS.primary,
+            backgroundColor: isRegistered ? "#D9534F" : COLORS.primary,
+            paddingVertical: 14,
+            borderRadius: 12,
+            alignItems: "center",
+            marginBottom: 12,
+          }}
+        >
+          <Text style={{ color: COLORS.white, fontWeight: "700", fontSize: 16 }}>
+            {isRegistered ? "Stop Background Sharing" : "Start Background Sharing"}
+          </Text>
+        </TouchableOpacity>
+
+        {/* SEND ONCE */}
+        <TouchableOpacity
+          onPress={sendLocationOnce}
+          disabled={sendingOnce}
+          style={{
+            backgroundColor: COLORS.navy,
             paddingVertical: 14,
             borderRadius: 12,
             alignItems: "center",
             flexDirection: "row",
           }}
         >
-          {sending && (
+          {sendingOnce && (
             <ActivityIndicator
               size="small"
               style={{ marginRight: 8 }}
               color={COLORS.white}
             />
           )}
+
           <Text style={{ color: COLORS.white, fontWeight: "700", fontSize: 16 }}>
-            {sharingEnabled ? "Stop Location Sharing" : "Start Location Sharing"}
+            Send Location Once
           </Text>
         </TouchableOpacity>
-
       </View>
     </SafeAreaView>
   );

@@ -3,6 +3,8 @@ import { Stack } from "expo-router";
 import { useEffect, useState } from "react";
 import { View, ActivityIndicator } from "react-native";
 import * as SecureStore from "expo-secure-store";
+import "@/tasks/childLocationTask";
+
 
 export default function RootLayout() {
   const [isReady, setIsReady] = useState(false);

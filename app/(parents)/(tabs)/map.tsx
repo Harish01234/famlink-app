@@ -1,42 +1,42 @@
 import React, { useEffect, useState } from "react";
-import { View, Text, ActivityIndicator, StyleSheet } from "react-native";
+import { View, Text, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import io from "socket.io-client";
+import io, { Socket } from "socket.io-client";
+
+type LocationType = {
+  lat: number;
+  lng: number;
+  ts: number;
+};
 
 export default function ParentLiveDashboard() {
-  const [location, setLocation] = useState<{
-    lat: number;
-    lng: number;
-    ts: number;
-  } | null>(null);
-
+  const [location, setLocation] = useState<LocationType | null>(null);
   const [connected, setConnected] = useState(false);
 
   useEffect(() => {
-    const socket = io("http://168.231.123.52:4000");
+    const socket: Socket = io("http://168.231.123.52:4000");
 
     socket.on("connect", () => {
       setConnected(true);
-
-      // IMPORTANT: you must pass childId here 
       socket.emit("listenToChild", "69199663f20f1f9df76b7518");
     });
 
-    socket.on("locationUpdate", (data) => {
+    socket.on("locationUpdate", (data: LocationType) => {
       setLocation(data);
     });
 
-    return () => socket.disconnect();
+    return () => {
+      socket.off("connect");
+      socket.off("locationUpdate");
+      socket.disconnect(); // ✔ proper cleanup
+    };
   }, []);
 
   return (
     <SafeAreaView style={styles.container}>
       <View style={styles.card}>
-        
-        {/* Header */}
         <Text style={styles.title}>🚀 Parent Live Dashboard</Text>
 
-        {/* Connection Status */}
         <View style={styles.statusContainer}>
           <Text
             style={[
@@ -48,7 +48,6 @@ export default function ParentLiveDashboard() {
           </Text>
         </View>
 
-        {/* Location Card */}
         <View style={styles.locationCard}>
           <Text style={styles.sectionTitle}>📍 Live Child Location</Text>
 
@@ -69,22 +68,18 @@ export default function ParentLiveDashboard() {
               </Text>
             </>
           ) : (
-            <Text style={styles.waitingText}>Waiting for location updates…</Text>
+            <Text style={styles.waitingText}>Waiting for updates…</Text>
           )}
         </View>
 
-        {/* Footer */}
         <Text style={styles.footerText}>
-          This dashboard updates instantly whenever the child sends new GPS data.
+          Updates arrive instantly whenever the child sends GPS data.
         </Text>
       </View>
     </SafeAreaView>
   );
 }
 
-// --------------------------------------------------------
-// 🎨 STYLES
-// --------------------------------------------------------
 const styles = StyleSheet.create({
   container: {
     flex: 1,
@@ -98,10 +93,6 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderColor: "#2d3447",
     borderWidth: 1,
-    shadowColor: "#000",
-    shadowOpacity: 0.4,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 6 },
   },
   title: {
     textAlign: "center",

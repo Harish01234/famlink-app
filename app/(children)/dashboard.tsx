@@ -3,24 +3,25 @@ import {
   View,
   Text,
   TouchableOpacity,
-  TextInput,
   ActivityIndicator,
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Location from "expo-location";
 import * as SecureStore from "expo-secure-store";
-import * as TaskManager from "expo-task-manager";
-import * as BackgroundTask from "expo-background-task";
 
 import LogoutButton from "@/components/LogoutButton";
 
 import {
-  CHILD_LOCATION_TASK,
-  registerChildLocationTask,
-  unregisterChildLocationTask,
-  getChildLocationTaskInfo,
+  startChildLocationUpdates,
+  stopChildLocationUpdates,
+  isChildLocationTaskRunning,
 } from "@/tasks/childLocationTask";
+
+const API = "http://168.231.123.52:4000";
+
+// 🔥 FIXED CHILD ID HERE ALSO
+const FIXED_CHILD_ID = "69199663f20f1f9df76b7518";
 
 export default function ChildDashboard() {
   const COLORS = {
@@ -30,46 +31,34 @@ export default function ChildDashboard() {
     white: "#FFFFFF",
   };
 
-  const API = "http://168.231.123.52:4000";
-  const childId = "69199663f20f1f9df76b7518";
-
-  const [joinCode, setJoinCode] = useState("");
   const [sendingOnce, setSendingOnce] = useState(false);
-
-  const [taskStatus, setTaskStatus] =
-    useState<BackgroundTask.BackgroundTaskStatus | null>(null);
-  const [isRegistered, setIsRegistered] = useState(false);
-  const [lastSent, setLastSent] = useState<string | null>(null);
+  const [bgRunning, setBgRunning] = useState(false);
+  const [lastManualSent, setLastManualSent] = useState<string | null>(null);
 
   // -----------------------------------------------------
-  // Load task info on screen focus/mount
+  // Load background task status
   // -----------------------------------------------------
   useEffect(() => {
-    refreshTaskInfo();
+    const check = async () => {
+      const running = await isChildLocationTaskRunning();
+      setBgRunning(running);
+    };
+    check();
   }, []);
 
-  const refreshTaskInfo = async () => {
-    const info = await getChildLocationTaskInfo();
-    setTaskStatus(info.status);
-    setIsRegistered(info.isRegistered);
-  };
-
   // -----------------------------------------------------
-  // Send location manually once
+  // MANUAL SEND ONCE
   // -----------------------------------------------------
   const sendLocationOnce = async () => {
     try {
       setSendingOnce(true);
 
       const token = await SecureStore.getItemAsync("token");
-      if (!token) {
-        Alert.alert("Error", "Please login again.");
-        return;
-      }
+      if (!token) return Alert.alert("Error", "Login again.");
 
-      let fg = await Location.requestForegroundPermissionsAsync();
+      const fg = await Location.requestForegroundPermissionsAsync();
       if (fg.status !== "granted") {
-        Alert.alert("Permission", "Foreground permission required.");
+        Alert.alert("Permission", "Foreground location required.");
         return;
       }
 
@@ -86,18 +75,20 @@ export default function ChildDashboard() {
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ childId, lat, lng }),
+        body: JSON.stringify({
+          childId: FIXED_CHILD_ID, // 🔥 FIXED
+          lat,
+          lng,
+        }),
       });
 
-      const data = await res.json();
-      if (!data.success) {
-        Alert.alert("Error", "Failed to send location.");
+      const json = await res.json();
+      if (!json.success) {
+        Alert.alert("Error", "Failed to send");
         return;
       }
 
-      const now = new Date().toLocaleTimeString();
-      setLastSent(now);
-
+      setLastManualSent(new Date().toLocaleTimeString());
       Alert.alert("Success", "Location sent!");
     } finally {
       setSendingOnce(false);
@@ -105,85 +96,42 @@ export default function ChildDashboard() {
   };
 
   // -----------------------------------------------------
-  // Start background location
+  // BACKGROUND START
   // -----------------------------------------------------
   const startBackground = async () => {
-    const status = await BackgroundTask.getStatusAsync();
-    if (status !== BackgroundTask.BackgroundTaskStatus.Available) {
-      Alert.alert("Unavailable", "Background tasks not available.");
-      return;
-    }
-
-    let fg = await Location.requestForegroundPermissionsAsync();
+    const fg = await Location.requestForegroundPermissionsAsync();
     if (fg.status !== "granted") {
-      Alert.alert("Permission", "Foreground permission needed.");
+      Alert.alert("Permission", "Foreground location required.");
       return;
     }
 
-    let bg = await Location.requestBackgroundPermissionsAsync();
+    const bg = await Location.requestBackgroundPermissionsAsync();
     if (bg.status !== "granted") {
-      Alert.alert("Permission", "Background location permission needed.");
+      Alert.alert("Permission", "Background location required.");
       return;
     }
 
-    await registerChildLocationTask();
-    await refreshTaskInfo();
+    await startChildLocationUpdates();
+    const running = await isChildLocationTaskRunning();
+    setBgRunning(running);
 
-    Alert.alert(
-      "Enabled",
-      "Background sharing started.\nYour location will send periodically."
-    );
+    Alert.alert("Enabled", "Background sharing started.");
   };
 
   // -----------------------------------------------------
-  // Stop background location
+  // BACKGROUND STOP
   // -----------------------------------------------------
   const stopBackground = async () => {
-    await unregisterChildLocationTask();
-    await refreshTaskInfo();
+    await stopChildLocationUpdates();
+    const running = await isChildLocationTaskRunning();
+    setBgRunning(running);
+
     Alert.alert("Stopped", "Background sharing stopped.");
   };
 
   const toggleBackground = async () => {
-    if (isRegistered) await stopBackground();
-    else await startBackground();
-  };
-
-  // -----------------------------------------------------
-  // Join Family
-  // -----------------------------------------------------
-  const joinFamily = async () => {
-    if (!joinCode.trim()) {
-      Alert.alert("Error", "Enter valid family code.");
-      return;
-    }
-
-    try {
-      const token = await SecureStore.getItemAsync("token");
-      if (!token) return Alert.alert("Error", "Login again.");
-
-      const res = await fetch(`${API}/api/family/join`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ inviteCode: joinCode }),
-      });
-
-      const data = await res.json();
-      if (!data.family) {
-        Alert.alert("Error", "Invalid code.");
-        return;
-      }
-
-      await SecureStore.setItemAsync("familyId", data.family._id);
-
-      Alert.alert("Success", "Joined family!");
-      setJoinCode("");
-    } catch (e) {
-      Alert.alert("Error", "Failed to join family.");
-    }
+    if (bgRunning) stopBackground();
+    else startBackground();
   };
 
   // -----------------------------------------------------
@@ -192,7 +140,6 @@ export default function ChildDashboard() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: COLORS.white }}>
       <View style={{ padding: 20, flex: 1 }}>
-        {/* HEADER */}
         <View
           style={{
             flexDirection: "row",
@@ -203,56 +150,10 @@ export default function ChildDashboard() {
           <Text style={{ fontSize: 24, fontWeight: "700", color: COLORS.navy }}>
             Child Dashboard
           </Text>
-
           <LogoutButton />
         </View>
 
-        {/* JOIN FAMILY */}
-        <View
-          style={{
-            backgroundColor: COLORS.grey,
-            padding: 16,
-            borderRadius: 14,
-            marginBottom: 20,
-          }}
-        >
-          <Text style={{ fontSize: 18, fontWeight: "700", color: COLORS.navy }}>
-            Join Family
-          </Text>
-
-          <TextInput
-            placeholder="Enter Family Code"
-            value={joinCode}
-            onChangeText={setJoinCode}
-            placeholderTextColor={COLORS.navy}
-            style={{
-              backgroundColor: COLORS.white,
-              padding: 12,
-              borderRadius: 10,
-              marginTop: 12,
-              borderWidth: 1,
-              borderColor: COLORS.grey,
-              color: COLORS.navy,
-            }}
-          />
-
-          <TouchableOpacity
-            onPress={joinFamily}
-            style={{
-              backgroundColor: COLORS.primary,
-              paddingVertical: 12,
-              borderRadius: 10,
-              alignItems: "center",
-              marginTop: 10,
-            }}
-          >
-            <Text style={{ color: COLORS.white, fontWeight: "700" }}>
-              Join Family
-            </Text>
-          </TouchableOpacity>
-        </View>
-
-        {/* BACKGROUND STATUS CARD */}
+        {/* BACKGROUND STATUS */}
         <View
           style={{
             backgroundColor: COLORS.grey,
@@ -266,28 +167,21 @@ export default function ChildDashboard() {
           </Text>
 
           <Text style={{ color: COLORS.navy, marginTop: 8 }}>
-            Service Status:{" "}
-            {taskStatus !== null
-              ? BackgroundTask.BackgroundTaskStatus[taskStatus]
-              : "Unknown"}
+            Status: {bgRunning ? "RUNNING" : "STOPPED"}
           </Text>
 
-          <Text style={{ color: COLORS.navy }}>
-            Registered: {isRegistered ? "YES" : "NO"}
-          </Text>
-
-          {lastSent && (
+          {lastManualSent && (
             <Text style={{ color: COLORS.navy, marginTop: 6 }}>
-              Last Manual Send: {lastSent}
+              Last Manual Send: {lastManualSent}
             </Text>
           )}
         </View>
 
-        {/* TOGGLE BACKGROUND */}
+        {/* BACKGROUND TOGGLE */}
         <TouchableOpacity
           onPress={toggleBackground}
           style={{
-            backgroundColor: isRegistered ? "#D9534F" : COLORS.primary,
+            backgroundColor: bgRunning ? "#D9534F" : COLORS.primary,
             paddingVertical: 14,
             borderRadius: 12,
             alignItems: "center",
@@ -295,11 +189,11 @@ export default function ChildDashboard() {
           }}
         >
           <Text style={{ color: COLORS.white, fontWeight: "700", fontSize: 16 }}>
-            {isRegistered ? "Stop Background Sharing" : "Start Background Sharing"}
+            {bgRunning ? "Stop Background Sharing" : "Start Background Sharing"}
           </Text>
         </TouchableOpacity>
 
-        {/* SEND ONCE */}
+        {/* MANUAL SEND */}
         <TouchableOpacity
           onPress={sendLocationOnce}
           disabled={sendingOnce}
@@ -312,11 +206,7 @@ export default function ChildDashboard() {
           }}
         >
           {sendingOnce && (
-            <ActivityIndicator
-              size="small"
-              style={{ marginRight: 8 }}
-              color={COLORS.white}
-            />
+            <ActivityIndicator size="small" style={{ marginRight: 8 }} color={COLORS.white} />
           )}
 
           <Text style={{ color: COLORS.white, fontWeight: "700", fontSize: 16 }}>
